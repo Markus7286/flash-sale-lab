@@ -1,4 +1,4 @@
-.PHONY: up down logs test psql redis-cli
+.PHONY: up down logs test bench bench-v1 bench-v2 psql redis-cli
 
 up:
 	docker compose up -d --build
@@ -12,6 +12,21 @@ logs:
 # The tests skip themselves rather than fail when Postgres or Redis is unreachable.
 test:
 	go test ./... -count=1
+
+K6_RUN = docker run --rm -i \
+	--network $$(docker compose ps --format '{{.Name}}' api | head -1 | sed 's/-api-1/_default/') \
+	-v "$$(pwd)/k6:/scripts" -e BASE_URL=http://api:8080 \
+	grafana/k6:latest run /scripts/flash-sale.js
+
+# The Postgres conditional UPDATE path.
+bench-v1:
+	$(K6_RUN) -e VERSION=v1
+
+# The Redis Lua path.
+bench-v2:
+	$(K6_RUN) -e VERSION=v2
+
+bench: bench-v1 bench-v2
 
 psql:
 	docker compose exec postgres psql -U flashsale -d flashsale

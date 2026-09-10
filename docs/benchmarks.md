@@ -1,0 +1,77 @@
+# Benchmarks
+
+Every number here comes from `make bench-v1` / `make bench-v2`, which drive the
+same handlers in the same binary on the same machine. The only thing that
+changes between the two runs is which `Reserver` the request lands on.
+
+## Environment
+
+| | |
+|---|---|
+| CPU | 12th Gen Intel Core i7-12700H, 20 logical cores |
+| Memory | 15 GB |
+| Kernel | 6.18.33.2-microsoft-standard-WSL2 |
+| Go | 1.27.1 |
+| PostgreSQL | 16.15 (Docker, default config) |
+| Redis | 7.4.11 (Docker, default config) |
+| Load generator | k6 (Docker), same host as the system under test |
+
+**Caveat, stated up front:** the load generator shares the machine with the API
+and both datastores. That depresses every number equally, so the *ratio* between
+v1 and v2 is trustworthy while the absolute ceiling is not. Phase 5 re-runs this
+with a ramping profile to find the actual knee.
+
+## Method
+
+- 50 constant VUs, 30 s, one reservation per iteration.
+- Stock is seeded to 2,000,000 — far more than a run can consume. A sold-out
+  request takes a shorter code path than a successful one, so letting the SKU run
+  dry would flatter whichever backend rejects faster. Every request measured here
+  is a *successful write*.
+- Unique `X-User-Id` and `X-Request-Id` per iteration, so neither the per-user
+  limit nor the idempotency check can short-circuit the write path.
+- Postgres pool capped at 25 connections (`DB_MAX_CONNS`), not pgxpool's default
+  of `max(4, NumCPU)`.
+- Zero-oversell is **not** asserted here; it is proven by the Go concurrency
+  tests in `internal/flashsale/reserve_test.go`. k6 only checks the books balance
+  at teardown (`remaining + units_sold == seeded stock`), which held on every run.
+
+## Results — 2026-09-10
+
+| | v1 `postgres-update` | v2 `redis-lua` | change |
+|---|---|---|---|
+| Throughput | 774 req/s | 26,199 req/s | **33.8×** |
+| p50 | 53.6 ms | 1.60 ms | 33× faster |
+| p90 | 108.4 ms | 2.67 ms | 41× faster |
+| p95 | 127.8 ms | 3.07 ms | 42× faster |
+| p99 | 176.7 ms | 4.03 ms | **44× faster** |
+| max | 373.9 ms | 611.2 ms | — |
+| Failed requests | 0 / 23,372 | 0 / 804,620 | — |
+| Oversold | 0 | 0 | — |
+
+An earlier v1 run at identical settings gave 806 req/s / p95 139 ms, so treat the
+v1 figure as ~780–810 req/s rather than a precise 774.
+
+## Reading the gap
+
+v1 is not a strawman — it is correct, and `CHECK (stock >= 0)` means the database
+itself would refuse to oversell even if the application logic were wrong. What it
+cannot escape is the shape of the problem: **every buyer of one SKU contends on
+one row.** `UPDATE products SET stock = stock - 1 WHERE sku = $1 AND stock >= 1`
+takes a row lock that is held until the transaction commits, so the product row
+serialises the entire sale. Throughput becomes a function of transaction latency,
+and 50 concurrent buyers spend most of their time queued behind that lock — which
+is exactly what the 53 ms median says.
+
+v2 removes the lock rather than optimising it. The Lua script is the unit of
+atomicity, Redis runs it to completion single-threaded, and nothing is held
+across a network round trip. The p99 of 4 ms is essentially one RTT plus the
+script.
+
+The v2 `max` of 611 ms is worse than v1's and is not noise worth hiding: it is
+the first request of the run paying for script loading plus connection pool
+warm-up, against a p99 of 4 ms.
+
+50 VUs is very likely not enough to saturate v2 — p99 stayed at 4 ms throughout,
+which is not the signature of a system under pressure. The 26k figure is a floor,
+not a ceiling.
