@@ -1,0 +1,61 @@
+x-app-env: &app-env
+  DATABASE_URL: postgres://${POSTGRES_USER:-flashsale}:${POSTGRES_PASSWORD:-flashsale}@postgres:5432/${POSTGRES_DB:-flashsale}?sslmode=disable
+  REDIS_ADDR: redis:6379
+  DB_MAX_CONNS: ${DB_MAX_CONNS:-25}
+  PER_USER_LIMIT: ${PER_USER_LIMIT:-1}
+
+services:
+  postgres:
+    image: postgres:${POSTGRES_VERSION:-16}-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-flashsale}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-flashsale}
+      POSTGRES_DB: ${POSTGRES_DB:-flashsale}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-flashsale}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:${REDIS_VERSION:-7}-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      args:
+        SERVICE: api
+    ports:
+      - "${API_PORT:-8080}:8080"
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      args:
+        SERVICE: worker
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:
