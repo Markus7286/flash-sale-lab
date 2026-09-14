@@ -143,6 +143,11 @@ func (p *PGReserver) SeedStock(ctx context.Context, sku string, stock int64) err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// Take the row lock Reserve takes, so an in-flight reservation commits its order
+	// before the DELETE below runs instead of surviving the reset.
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM products WHERE sku = $1 FOR UPDATE`, sku); err != nil {
+		return fmt.Errorf("lock product %q: %w", sku, err)
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM orders WHERE sku = $1`, sku); err != nil {
 		return fmt.Errorf("clear orders for %q: %w", sku, err)
 	}
