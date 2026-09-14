@@ -70,7 +70,7 @@ func run(logger *slog.Logger) error {
 
 	handler := httpapi.NewServer(logger,
 		httpapi.Backend{Version: "v1", Reserver: flashsale.NewPGReserver(pool, cfg.PerUserLimit)},
-		httpapi.Backend{Version: "v2", Reserver: flashsale.NewRedisReserver(rdb, cfg.PerUserLimit)},
+		httpapi.Backend{Version: "v2", Reserver: flashsale.NewRedisReserver(rdb, cfg.PerUserLimit, cfg.SaleKeyTTL)},
 	).Routes()
 
 	srv := &http.Server{

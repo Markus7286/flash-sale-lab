@@ -3,6 +3,7 @@ x-app-env: &app-env
   REDIS_ADDR: redis:6379
   DB_MAX_CONNS: ${DB_MAX_CONNS:-25}
   PER_USER_LIMIT: ${PER_USER_LIMIT:-1}
+  SALE_KEY_TTL: ${SALE_KEY_TTL:-24h}
 
 services:
   postgres:

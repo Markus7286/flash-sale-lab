@@ -56,7 +56,8 @@ func newReserver(t *testing.T, backend string, perUserLimit int64) flashsale.Res
 			t.Skipf("redis unavailable (%v); run `make up` to enable this test", err)
 		}
 		t.Cleanup(func() { rdb.Close() })
-		return flashsale.NewRedisReserver(rdb, perUserLimit)
+		// A TTL keeps test SKUs from piling up and exercises the expiry path in reserve.lua.
+		return flashsale.NewRedisReserver(rdb, perUserLimit, time.Hour)
 
 	default:
 		t.Fatalf("unknown backend %q", backend)

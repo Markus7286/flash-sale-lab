@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -18,19 +19,26 @@ type RedisReserver struct {
 	rdb          redis.Cmdable
 	script       *redis.Script
 	perUserLimit int64
+	keyTTL       time.Duration
 }
 
 var _ Reserver = (*RedisReserver)(nil)
 
-// NewRedisReserver caps each user at perUserLimit units of one SKU.
-func NewRedisReserver(rdb redis.Cmdable, perUserLimit int64) *RedisReserver {
+// NewRedisReserver caps each user at perUserLimit units of one SKU. A positive
+// keyTTL expires a seeded SKU together with its bookkeeping; zero keeps it forever.
+func NewRedisReserver(rdb redis.Cmdable, perUserLimit int64, keyTTL time.Duration) *RedisReserver {
 	if perUserLimit < 1 {
 		perUserLimit = 1
+	}
+	// go-redis reads a negative expiration as KEEPTTL, which is not "no TTL".
+	if keyTTL < 0 {
+		keyTTL = 0
 	}
 	return &RedisReserver{
 		rdb:          rdb,
 		script:       redis.NewScript(reserveSrc),
 		perUserLimit: perUserLimit,
+		keyTTL:       keyTTL,
 	}
 }
 
@@ -76,7 +84,7 @@ func (r *RedisReserver) Reserve(ctx context.Context, req Request) (Result, error
 // SeedStock is destructive by design: it drops the per-user and idempotency keys.
 func (r *RedisReserver) SeedStock(ctx context.Context, sku string, stock int64) error {
 	pipe := r.rdb.TxPipeline()
-	pipe.Set(ctx, stockKey(sku), stock, 0)
+	pipe.Set(ctx, stockKey(sku), stock, r.keyTTL)
 	pipe.Del(ctx, usersKey(sku), reqsKey(sku), soldKey(sku))
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("seed stock for %q: %w", sku, err)

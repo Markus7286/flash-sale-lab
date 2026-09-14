@@ -41,6 +41,16 @@ local remaining = redis.call('DECRBY', KEYS[1], qty)
 redis.call('HINCRBY', KEYS[2], user_id, qty)
 redis.call('SADD', KEYS[3], request_id)
 
-redis.call('INCRBY', KEYS[4], qty)
+-- The first sale after a seed creates the bookkeeping keys. They take the stock
+-- key's TTL so the per-user limit and idempotency last exactly as long as the
+-- stock they guard: expiring earlier would let a buyer through twice.
+if redis.call('INCRBY', KEYS[4], qty) == qty then
+  local ttl = redis.call('PTTL', KEYS[1])
+  if ttl > 0 then
+    redis.call('PEXPIRE', KEYS[2], ttl)
+    redis.call('PEXPIRE', KEYS[3], ttl)
+    redis.call('PEXPIRE', KEYS[4], ttl)
+  end
+end
 
 return {0, remaining}
