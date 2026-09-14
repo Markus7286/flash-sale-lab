@@ -63,6 +63,14 @@ serialises the entire sale. Throughput becomes a function of transaction latency
 and 50 concurrent buyers spend most of their time queued behind that lock — which
 is exactly what the 53 ms median says.
 
+v1 is also deliberately written as the textbook application-side transaction,
+not the fastest Postgres can do: six round trips per reservation (BEGIN, replay
+check, UPDATE, replay-and-limit check, INSERT, COMMIT), with the row lock held
+across the last three, and an over-limit buyer decrements before rolling back.
+Folding the whole reservation into one statement or a stored function would
+shorten the lock hold and narrow the gap, but it would still serialise on the
+row; that variant is not measured here.
+
 v2 removes the lock rather than optimising it. The Lua script is the unit of
 atomicity, Redis runs it to completion single-threaded, and nothing is held
 across a network round trip. The p99 of 4 ms is essentially one RTT plus the
