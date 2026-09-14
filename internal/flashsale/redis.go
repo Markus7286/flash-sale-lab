@@ -5,7 +5,6 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
-	"strconv"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -37,14 +36,15 @@ func NewRedisReserver(rdb redis.Cmdable, perUserLimit int64) *RedisReserver {
 
 func (r *RedisReserver) Name() string { return "redis-lua" }
 
-// The {sku} hash tag keeps all three keys in one slot, without which the script
-// would be illegal on a Redis Cluster.
+// The {sku} hash tag keeps every key in one slot, without which the script and
+// the MULTI in Stats would be illegal on a Redis Cluster.
 func stockKey(sku string) string { return "{" + sku + "}:stock" }
 func usersKey(sku string) string { return "{" + sku + "}:users" }
 func reqsKey(sku string) string  { return "{" + sku + "}:reqs" }
+func soldKey(sku string) string  { return "{" + sku + "}:sold" }
 
 func keysFor(sku string) []string {
-	return []string{stockKey(sku), usersKey(sku), reqsKey(sku)}
+	return []string{stockKey(sku), usersKey(sku), reqsKey(sku), soldKey(sku)}
 }
 
 // Reserve sends EVALSHA and falls back to EVAL only on NOSCRIPT, so the hot path
@@ -77,18 +77,20 @@ func (r *RedisReserver) Reserve(ctx context.Context, req Request) (Result, error
 func (r *RedisReserver) SeedStock(ctx context.Context, sku string, stock int64) error {
 	pipe := r.rdb.TxPipeline()
 	pipe.Set(ctx, stockKey(sku), stock, 0)
-	pipe.Del(ctx, usersKey(sku), reqsKey(sku))
+	pipe.Del(ctx, usersKey(sku), reqsKey(sku), soldKey(sku))
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("seed stock for %q: %w", sku, err)
 	}
 	return nil
 }
 
-// Stats reads the three keys in one round trip.
+// Stats reads every key inside one MULTI, so a reservation cannot land between
+// the reads and leave remaining and units sold out of step.
 func (r *RedisReserver) Stats(ctx context.Context, sku string) (Stats, error) {
-	pipe := r.rdb.Pipeline()
+	pipe := r.rdb.TxPipeline()
 	stockCmd := pipe.Get(ctx, stockKey(sku))
-	usersCmd := pipe.HGetAll(ctx, usersKey(sku))
+	soldCmd := pipe.Get(ctx, soldKey(sku))
+	buyersCmd := pipe.HLen(ctx, usersKey(sku))
 	reqsCmd := pipe.SCard(ctx, reqsKey(sku))
 	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
 		return Stats{}, fmt.Errorf("read stats for %q: %w", sku, err)
@@ -102,18 +104,15 @@ func (r *RedisReserver) Stats(ctx context.Context, sku string) (Stats, error) {
 		return Stats{}, fmt.Errorf("read stock for %q: %w", sku, err)
 	}
 
-	users, err := usersCmd.Result()
-	if err != nil {
-		return Stats{}, fmt.Errorf("read buyers for %q: %w", sku, err)
+	sold, err := soldCmd.Int64()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return Stats{}, fmt.Errorf("read units sold for %q: %w", sku, err)
 	}
 
-	stats := Stats{Remaining: remaining, Buyers: int64(len(users)), Reservations: reqsCmd.Val()}
-	for user, qty := range users {
-		n, err := strconv.ParseInt(qty, 10, 64)
-		if err != nil {
-			return Stats{}, fmt.Errorf("bad quantity %q for %q/%q: %w", qty, sku, user, err)
-		}
-		stats.UnitsSold += n
-	}
-	return stats, nil
+	return Stats{
+		Remaining:    remaining,
+		Reservations: reqsCmd.Val(),
+		Buyers:       buyersCmd.Val(),
+		UnitsSold:    sold,
+	}, nil
 }

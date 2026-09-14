@@ -3,6 +3,7 @@
 -- KEYS[1] {sku}:stock  string  remaining stock
 -- KEYS[2] {sku}:users  hash    user_id -> quantity already bought
 -- KEYS[3] {sku}:reqs   set     request_ids already applied (idempotency)
+-- KEYS[4] {sku}:sold   string  units sold, so Stats never has to walk KEYS[2]
 --
 -- ARGV[1] user_id
 -- ARGV[2] request_id
@@ -39,5 +40,7 @@ end
 local remaining = redis.call('DECRBY', KEYS[1], qty)
 redis.call('HINCRBY', KEYS[2], user_id, qty)
 redis.call('SADD', KEYS[3], request_id)
+
+redis.call('INCRBY', KEYS[4], qty)
 
 return {0, remaining}
