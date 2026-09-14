@@ -165,20 +165,23 @@ func (p *PGReserver) SeedStock(ctx context.Context, sku string, stock int64) err
 	return nil
 }
 
+// Stats is one statement, so stock and the order totals come from one snapshot
+// and always balance even while reservations are landing.
 func (p *PGReserver) Stats(ctx context.Context, sku string) (Stats, error) {
-	remaining, err := stockOf(ctx, p.pool, sku)
-	if err != nil {
-		return Stats{}, err
-	}
-
 	var stats Stats
-	if err := p.pool.QueryRow(ctx, `
-		SELECT count(*), count(DISTINCT user_id), COALESCE(sum(qty), 0)
-		  FROM orders WHERE sku = $1`,
-		sku).Scan(&stats.Reservations, &stats.Buyers, &stats.UnitsSold); err != nil {
-		return Stats{}, fmt.Errorf("read orders for %q: %w", sku, err)
+	err := p.pool.QueryRow(ctx, `
+		SELECT p.stock, count(o.id), count(DISTINCT o.user_id), COALESCE(sum(o.qty), 0)
+		  FROM products p
+		  LEFT JOIN orders o ON o.sku = p.sku
+		 WHERE p.sku = $1
+		 GROUP BY p.sku`,
+		sku).Scan(&stats.Remaining, &stats.Reservations, &stats.Buyers, &stats.UnitsSold)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Stats{}, ErrUnknownSKU
 	}
-	stats.Remaining = remaining
+	if err != nil {
+		return Stats{}, fmt.Errorf("read stats for %q: %w", sku, err)
+	}
 	return stats, nil
 }
 
