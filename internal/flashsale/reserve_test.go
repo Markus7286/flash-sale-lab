@@ -212,7 +212,8 @@ func TestReserveIdempotent(t *testing.T) {
 }
 
 // TestReserveConcurrentReplay hammers one request_id from many goroutines: only
-// one may end up holding stock.
+// one may end up holding stock, and every other attempt must be answered as a
+// replay rather than tripping the per-user limit.
 func TestReserveConcurrentReplay(t *testing.T) {
 	const attempts = 200
 
@@ -241,8 +242,12 @@ func TestReserveConcurrentReplay(t *testing.T) {
 						t.Errorf("attempt %d: %v", i, err)
 						return
 					}
-					if res.Status == flashsale.StatusReserved {
+					switch res.Status {
+					case flashsale.StatusReserved:
 						reserved.Add(1)
+					case flashsale.StatusDuplicate:
+					default:
+						t.Errorf("attempt %d: status = %s, want reserved or duplicate", i, res.Status)
 					}
 				}()
 			}

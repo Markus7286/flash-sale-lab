@@ -100,12 +100,19 @@ func (p *PGReserver) Reserve(ctx context.Context, req Request) (Result, error) {
 	}
 
 	// Checked after the decrement on purpose: the product row lock serialises this
-	// SKU, so the sum cannot be read stale by two requests from the same user.
+	// SKU, so neither the replay check nor the sum can be read stale. The fast path
+	// above ran before the lock, so a concurrent replay that committed while we
+	// waited is only visible here and must win over the per-user limit.
+	var replayed bool
 	var bought int64
-	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(SUM(qty), 0) FROM orders WHERE sku = $1 AND user_id = $2`,
-		req.SKU, req.UserID).Scan(&bought); err != nil {
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM orders WHERE sku = $1 AND request_id = $2),
+		       (SELECT COALESCE(SUM(qty), 0) FROM orders WHERE sku = $1 AND user_id = $3)`,
+		req.SKU, req.RequestID, req.UserID).Scan(&replayed, &bought); err != nil {
 		return Result{}, fmt.Errorf("read user total: %w", err)
+	}
+	if replayed {
+		return Result{Status: StatusDuplicate, Remaining: remaining + req.Qty}, nil
 	}
 	if bought+req.Qty > limit {
 		// The deferred rollback puts the stock back.
