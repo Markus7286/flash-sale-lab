@@ -109,8 +109,7 @@ func (s *Server) handleFlashSale(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body flashSaleRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "malformed json body")
+	if !decodeJSON(w, r, &body) {
 		return
 	}
 	if body.SKU == "" {
@@ -203,8 +202,7 @@ func (s *Server) handleSeedStock(w http.ResponseWriter, r *http.Request) {
 
 	sku := r.PathValue("sku")
 	var body seedRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "malformed json body")
+	if !decodeJSON(w, r, &body) {
 		return
 	}
 	if body.Stock < 0 {
@@ -221,6 +219,26 @@ func (s *Server) handleSeedStock(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"sku": sku, "backend": reserver.Name(), "stock": body.Stock,
 	})
+}
+
+// maxBodyBytes is generous for the few-field bodies this API accepts and small
+// enough that a client cannot pin a handler by streaming an endless one.
+const maxBodyBytes = 64 << 10
+
+// decodeJSON writes the error response itself and reports whether decoding succeeded.
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	err := json.NewDecoder(r.Body).Decode(dst)
+	if err == nil {
+		return true
+	}
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+	} else {
+		writeError(w, http.StatusBadRequest, "malformed json body")
+	}
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, code int, payload any) {
