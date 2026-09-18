@@ -92,6 +92,44 @@ func readCounters(ctx context.Context, rdb redis.Cmdable, sku string) (redisCoun
 	return c, nil
 }
 
+// StockLevel is the Redis-side view of one SKU. It needs no Postgres read, so a
+// metrics scrape can afford to rebuild it on every collect.
+type StockLevel struct {
+	SKU       string
+	Total     int64
+	Remaining int64
+	Sold      int64
+	Queued    int64
+}
+
+// StockLevels reports every SKU the registry still lists, skipping any whose
+// counters have already expired underneath it.
+func StockLevels(ctx context.Context, rdb redis.Cmdable) ([]StockLevel, error) {
+	skus, err := RegisteredSKUs(ctx, rdb)
+	if err != nil {
+		return nil, err
+	}
+
+	levels := make([]StockLevel, 0, len(skus))
+	for _, sku := range skus {
+		c, err := readCounters(ctx, rdb, sku)
+		if errors.Is(err, ErrUnknownSKU) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		levels = append(levels, StockLevel{
+			SKU:       sku,
+			Total:     c.total,
+			Remaining: c.remaining,
+			Sold:      c.sold,
+			Queued:    c.queued,
+		})
+	}
+	return levels, nil
+}
+
 func counterErr(sku, name string, err error) error {
 	if errors.Is(err, redis.Nil) {
 		return ErrUnknownSKU

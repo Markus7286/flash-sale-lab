@@ -319,6 +319,7 @@ func (c *Consumer) settle(ctx context.Context, sku string, msgs []redis.XMessage
 
 	err := c.store.InsertOrders(ctx, orders)
 	if err == nil {
+		c.logPersisted(ctx, sku, orders)
 		return c.acknowledge(ctx, sku, orders)
 	}
 	if !isPermanent(err) {
@@ -357,6 +358,19 @@ func deliveryCount(deliveries map[string]int64, id string) int64 {
 		return n
 	}
 	return 1
+}
+
+// logPersisted is what lets one request_id be followed from the api to the row it
+// became. It is guarded because a batch holds up to BatchSize orders.
+func (c *Consumer) logPersisted(ctx context.Context, sku string, orders []Order) {
+	if !c.logger.Enabled(ctx, slog.LevelDebug) {
+		return
+	}
+	for _, order := range orders {
+		c.logger.Debug("order persisted", "consumer", c.cfg.Name, "sku", sku,
+			"request_id", order.RequestID, "user_id", order.UserID, "qty", order.Qty,
+			"stream_id", order.StreamID)
+	}
 }
 
 func (c *Consumer) acknowledge(ctx context.Context, sku string, orders []Order) error {

@@ -10,8 +10,10 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"flash-sale/internal/flashsale"
+	"flash-sale/internal/metrics"
 )
 
 const (
@@ -46,13 +48,23 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /backends", s.handleBackends)
 
-	mux.HandleFunc("POST /{version}/flash-sale", s.handleFlashSale)
+	mux.HandleFunc("POST /{version}/flash-sale", instrument(s.handleFlashSale))
 	mux.HandleFunc("GET /{version}/skus/{sku}/stock", s.handleStock)
 	mux.HandleFunc("PUT /{version}/admin/skus/{sku}/stock", s.handleSeedStock)
 
 	// Alias so curl and the smoke test need not know which backend is current.
-	mux.HandleFunc("POST /flash-sale", s.handleFlashSale)
+	mux.HandleFunc("POST /flash-sale", instrument(s.handleFlashSale))
 	return mux
+}
+
+// instrument times a handler that names its own outcome, which keeps the metric
+// free of the status-code guessing a ResponseWriter wrapper would need.
+func instrument(h func(http.ResponseWriter, *http.Request) (string, string)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		backend, result := h(w, r)
+		metrics.ObserveReserve(backend, result, time.Since(start))
+	}
 }
 
 // reserverFor writes the error response itself when there is no such backend.
@@ -94,35 +106,41 @@ type flashSaleResponse struct {
 	Remaining int64  `json:"remaining"`
 }
 
-func (s *Server) handleFlashSale(w http.ResponseWriter, r *http.Request) {
+// handleFlashSale returns the backend it reached and the outcome it produced, for
+// instrument to record.
+func (s *Server) handleFlashSale(w http.ResponseWriter, r *http.Request) (string, string) {
 	reserver, ok := s.reserverFor(w, r)
 	if !ok {
-		return
+		return "unknown", "unknown_backend"
 	}
+	backend := reserver.Name()
 
 	userID := r.Header.Get(headerUserID)
 	requestID := r.Header.Get(headerRequestID)
 	if userID == "" || requestID == "" {
 		writeError(w, http.StatusBadRequest,
 			"both "+headerUserID+" and "+headerRequestID+" headers are required")
-		return
+		return backend, "bad_request"
 	}
 
 	var body flashSaleRequest
 	if !decodeJSON(w, r, &body) {
-		return
+		return backend, "bad_request"
 	}
 	if body.SKU == "" {
 		writeError(w, http.StatusBadRequest, "sku is required")
-		return
+		return backend, "bad_request"
 	}
 	if body.Qty == 0 {
 		body.Qty = 1
 	}
 	if body.Qty < 0 {
 		writeError(w, http.StatusBadRequest, "qty must be positive")
-		return
+		return backend, "bad_request"
 	}
+
+	log := s.logger.With("backend", backend, "sku", body.SKU,
+		"user_id", userID, "request_id", requestID)
 
 	res, err := reserver.Reserve(r.Context(), flashsale.Request{
 		SKU:       body.SKU,
@@ -131,19 +149,24 @@ func (s *Server) handleFlashSale(w http.ResponseWriter, r *http.Request) {
 		Qty:       body.Qty,
 	})
 	if err != nil {
-		s.logger.Error("reserve failed", "backend", reserver.Name(),
-			"sku", body.SKU, "user_id", userID, "request_id", requestID, "err", err)
+		log.Error("reserve failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "reservation failed")
-		return
+		return backend, "error"
 	}
 
+	// Debug, not Info: one line per request costs more than the reservation at
+	// the rates this path is built for.
+	log.Debug("reserved", "status", res.Status.String(), "remaining", res.Remaining)
+
+	w.Header().Set(headerRequestID, requestID)
 	writeJSON(w, statusToCode(res.Status), flashSaleResponse{
 		Status:    res.Status.String(),
-		Backend:   reserver.Name(),
+		Backend:   backend,
 		SKU:       body.SKU,
 		RequestID: requestID,
 		Remaining: res.Remaining,
 	})
+	return backend, res.Status.String()
 }
 
 // statusToCode returns 409 for sold-out and per-user-limit: the request was well

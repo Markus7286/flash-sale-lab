@@ -13,11 +13,14 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 
 	"flash-sale/internal/config"
 	"flash-sale/internal/flashsale"
 	"flash-sale/internal/httpapi"
+	"flash-sale/internal/metrics"
 )
 
 const (
@@ -26,16 +29,15 @@ const (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	if err := run(logger); err != nil {
+	cfg := config.Load()
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	if err := run(logger, cfg); err != nil {
 		logger.Error("api stopped", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(logger *slog.Logger) error {
-	cfg := config.Load()
-
+func run(logger *slog.Logger, cfg config.Config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -68,15 +70,20 @@ func run(logger *slog.Logger) error {
 	}
 	logger.Info("connected to redis", "addr", cfg.RedisAddr)
 
-	handler := httpapi.NewServer(logger,
+	mux := httpapi.NewServer(logger,
 		httpapi.Backend{Version: "v1", Reserver: flashsale.NewPGReserver(pool, cfg.PerUserLimit)},
 		httpapi.Backend{Version: "v2", Reserver: flashsale.NewRedisReserver(rdb, cfg.PerUserLimit, cfg.SaleKeyTTL)},
 		httpapi.Backend{Version: "v3", Reserver: flashsale.NewStreamReserver(rdb, pool, cfg.PerUserLimit, cfg.SaleKeyTTL)},
 	).Routes()
 
+	// The api is the always-up process, so it owns the inventory gauges: a backlog
+	// the worker cannot publish while it is down is exactly the one worth seeing.
+	prometheus.MustRegister(metrics.NewInventoryCollector(rdb, logger))
+	mux.Handle("GET /metrics", promhttp.Handler())
+
 	srv := &http.Server{
 		Addr:              cfg.APIAddr,
-		Handler:           handler,
+		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,

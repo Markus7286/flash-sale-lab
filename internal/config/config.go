@@ -2,6 +2,7 @@
 package config
 
 import (
+	"log/slog"
 	"os"
 	"strconv"
 	"time"
@@ -12,6 +13,10 @@ type Config struct {
 	RedisAddr    string
 	DatabaseURL  string
 	PerUserLimit int64
+	LogLevel     slog.Level
+	// MetricsAddr is the worker's own listener; the api serves /metrics from
+	// APIAddr and ignores this.
+	MetricsAddr string
 	// DBMaxConns overrides pgxpool's default of max(4, NumCPU), which would throttle
 	// the v1 baseline for reasons unrelated to the design being measured.
 	DBMaxConns int32
@@ -39,6 +44,8 @@ func Load() Config {
 		RedisAddr:    env("REDIS_ADDR", "localhost:6379"),
 		DatabaseURL:  env("DATABASE_URL", ""),
 		PerUserLimit: envInt("PER_USER_LIMIT", 1),
+		LogLevel:     envLevel("LOG_LEVEL", slog.LevelInfo),
+		MetricsAddr:  env("METRICS_ADDR", ":8081"),
 		DBMaxConns:   int32(envInt("DB_MAX_CONNS", 25)),
 		SaleKeyTTL:   envDuration("SALE_KEY_TTL", 24*time.Hour),
 
@@ -71,6 +78,14 @@ func envInt(key string, fallback int64) int64 {
 		return fallback
 	}
 	return v
+}
+
+func envLevel(key string, fallback slog.Level) slog.Level {
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(os.Getenv(key))); err != nil {
+		return fallback
+	}
+	return level
 }
 
 func envDuration(key string, fallback time.Duration) time.Duration {
