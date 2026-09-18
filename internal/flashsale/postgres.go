@@ -17,10 +17,27 @@ var schemaSQL string
 // uniqueViolation is the SQLSTATE PostgreSQL raises for a UNIQUE conflict.
 const uniqueViolation = "23505"
 
+// migrateLockID is an arbitrary key for pg_advisory_xact_lock.
+const migrateLockID = 72860301
+
 // Migrate is idempotent, so every binary and every test can call it at startup.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
-	if _, err := pool.Exec(ctx, schemaSQL); err != nil {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin migration: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// The api and the worker start together, and concurrent CREATE TABLE IF NOT
+	// EXISTS can still collide on pg_type's unique index.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, migrateLockID); err != nil {
+		return fmt.Errorf("lock migration: %w", err)
+	}
+	if _, err := tx.Exec(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit migration: %w", err)
 	}
 	return nil
 }

@@ -4,6 +4,11 @@
 -- KEYS[2] {sku}:users  hash    user_id -> quantity already bought
 -- KEYS[3] {sku}:reqs   set     request_ids already applied (idempotency)
 -- KEYS[4] {sku}:sold   string  units sold, so Stats never has to walk KEYS[2]
+-- KEYS[5] {sku}:queued string  units published but not yet persisted (v3 only)
+-- KEYS[6] {sku}:orders stream  order messages for the worker (v3 only)
+--
+-- v2 passes four keys and v3 passes six, so one script serves both and the
+-- publish commits atomically with the decrement it describes.
 --
 -- ARGV[1] user_id
 -- ARGV[2] request_id
@@ -44,12 +49,20 @@ redis.call('SADD', KEYS[3], request_id)
 -- The first sale after a seed creates the bookkeeping keys. They take the stock
 -- key's TTL so the per-user limit and idempotency last exactly as long as the
 -- stock they guard: expiring earlier would let a buyer through twice.
-if redis.call('INCRBY', KEYS[4], qty) == qty then
+local first_sale = redis.call('INCRBY', KEYS[4], qty) == qty
+
+local stream = #KEYS == 6
+if stream then
+  redis.call('INCRBY', KEYS[5], qty)
+  redis.call('XADD', KEYS[6], '*', 'request_id', request_id, 'user_id', user_id, 'qty', qty)
+end
+
+if first_sale then
   local ttl = redis.call('PTTL', KEYS[1])
   if ttl > 0 then
-    redis.call('PEXPIRE', KEYS[2], ttl)
-    redis.call('PEXPIRE', KEYS[3], ttl)
-    redis.call('PEXPIRE', KEYS[4], ttl)
+    for i = 2, #KEYS do
+      redis.call('PEXPIRE', KEYS[i], ttl)
+    end
   end
 end
 

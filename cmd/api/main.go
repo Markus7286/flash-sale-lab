@@ -1,5 +1,5 @@
-// Command api serves the flash-sale endpoints with both backends mounted side by
-// side; the unversioned /flash-sale alias forwards to v2.
+// Command api serves the flash-sale endpoints with every backend mounted side by
+// side; the unversioned /flash-sale alias forwards to v3.
 package main
 
 import (
@@ -71,6 +71,7 @@ func run(logger *slog.Logger) error {
 	handler := httpapi.NewServer(logger,
 		httpapi.Backend{Version: "v1", Reserver: flashsale.NewPGReserver(pool, cfg.PerUserLimit)},
 		httpapi.Backend{Version: "v2", Reserver: flashsale.NewRedisReserver(rdb, cfg.PerUserLimit, cfg.SaleKeyTTL)},
+		httpapi.Backend{Version: "v3", Reserver: flashsale.NewStreamReserver(rdb, pool, cfg.PerUserLimit, cfg.SaleKeyTTL)},
 	).Routes()
 
 	srv := &http.Server{

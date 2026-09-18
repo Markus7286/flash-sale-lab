@@ -1,4 +1,4 @@
-.PHONY: up down logs test bench bench-v1 bench-v2 psql redis-cli
+.PHONY: up down logs test bench bench-v1 bench-v2 bench-v3 fault-test psql redis-cli
 
 up:
 	docker compose up -d --build
@@ -26,7 +26,15 @@ bench-v1:
 bench-v2:
 	$(K6_RUN) -e VERSION=v2
 
-bench: bench-v1 bench-v2
+# The Redis Lua path plus a stream publish, persisted by the worker.
+bench-v3:
+	$(K6_RUN) -e VERSION=v3
+
+bench: bench-v1 bench-v2 bench-v3
+
+# Kills the worker and every Postgres connection during bench-v3, then checks the books.
+fault-test:
+	./scripts/fault-test.sh
 
 psql:
 	docker compose exec postgres psql -U flashsale -d flashsale

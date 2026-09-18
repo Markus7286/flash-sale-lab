@@ -18,6 +18,18 @@ type Config struct {
 	// SaleKeyTTL must outlast the longest sale: when it elapses the Redis SKU and
 	// its idempotency and per-user keys disappear together. Zero disables expiry.
 	SaleKeyTTL time.Duration
+
+	// WorkerConsumer must be unique per worker process; a restarted container
+	// reusing its old name picks its own pending entries straight back up.
+	WorkerConsumer  string
+	StreamBatchSize int64
+	// StreamClaimIdle is how long an entry sits unacknowledged before another
+	// worker assumes its consumer died and takes it over.
+	StreamClaimIdle time.Duration
+	// StreamMaxDeliveries bounds retries of permanent failures only; transient
+	// ones such as a lost database connection are retried indefinitely.
+	StreamMaxDeliveries int64
+	ReconcileInterval   time.Duration
 }
 
 // Load reads the environment, falling back to values that match docker-compose.
@@ -29,7 +41,21 @@ func Load() Config {
 		PerUserLimit: envInt("PER_USER_LIMIT", 1),
 		DBMaxConns:   int32(envInt("DB_MAX_CONNS", 25)),
 		SaleKeyTTL:   envDuration("SALE_KEY_TTL", 24*time.Hour),
+
+		WorkerConsumer:      env("WORKER_CONSUMER", hostname()),
+		StreamBatchSize:     envInt("STREAM_BATCH_SIZE", 100),
+		StreamClaimIdle:     envDuration("STREAM_CLAIM_IDLE", 30*time.Second),
+		StreamMaxDeliveries: envInt("STREAM_MAX_DELIVERIES", 5),
+		ReconcileInterval:   envDuration("RECONCILE_INTERVAL", 30*time.Second),
 	}
+}
+
+func hostname() string {
+	name, err := os.Hostname()
+	if err != nil || name == "" {
+		return "worker"
+	}
+	return name
 }
 
 func env(key, fallback string) string {

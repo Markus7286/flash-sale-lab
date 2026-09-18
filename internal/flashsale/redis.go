@@ -58,11 +58,15 @@ func keysFor(sku string) []string {
 // Reserve sends EVALSHA and falls back to EVAL only on NOSCRIPT, so the hot path
 // carries a 40-byte digest rather than the whole script.
 func (r *RedisReserver) Reserve(ctx context.Context, req Request) (Result, error) {
+	return r.reserve(ctx, keysFor(req.SKU), req)
+}
+
+func (r *RedisReserver) reserve(ctx context.Context, keys []string, req Request) (Result, error) {
 	if req.Qty < 1 {
 		req.Qty = 1
 	}
 
-	raw, err := r.script.Run(ctx, r.rdb, keysFor(req.SKU),
+	raw, err := r.script.Run(ctx, r.rdb, keys,
 		req.UserID, req.RequestID, req.Qty, r.perUserLimit).Result()
 	if err != nil {
 		return Result{}, fmt.Errorf("run reserve.lua: %w", err)

@@ -27,3 +27,19 @@ CREATE TABLE IF NOT EXISTS orders (
 
 -- Supports the per-user limit lookup on the reservation path.
 CREATE INDEX IF NOT EXISTS orders_sku_user_idx ON orders (sku, user_id);
+
+-- Orders persisted by the worker for the v3 stream path. Kept apart from orders
+-- because v1 treats products.stock as remaining stock and wipes orders on seed,
+-- and there is no products row to reference: Redis owns v3 stock.
+--
+-- UNIQUE (sku, request_id) is what makes a redelivered message harmless.
+CREATE TABLE IF NOT EXISTS sale_orders (
+    id         BIGSERIAL   PRIMARY KEY,
+    request_id TEXT        NOT NULL,
+    sku        TEXT        NOT NULL,
+    user_id    TEXT        NOT NULL,
+    qty        BIGINT      NOT NULL CHECK (qty > 0),
+    stream_id  TEXT        NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (sku, request_id)
+);

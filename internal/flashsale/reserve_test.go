@@ -17,52 +17,70 @@ import (
 	"flash-sale/internal/flashsale"
 )
 
-// Every correctness property must hold for both backends, so every test runs
-// against both.
-var backends = []string{"postgres", "redis"}
+// Every correctness property must hold for every backend, so every test runs
+// against all of them.
+var backends = []string{"postgres", "redis", "stream"}
+
+// testKeyTTL keeps test SKUs from piling up and exercises the expiry path in reserve.lua.
+const testKeyTTL = time.Hour
 
 func dialTimeout() time.Duration { return 5 * time.Second }
 
-// newReserver skips the test when the dependency is unreachable, so `go test
-// ./...` still works without docker compose up.
 func newReserver(t *testing.T, backend string, perUserLimit int64) flashsale.Reserver {
+	t.Helper()
+
+	switch backend {
+	case "postgres":
+		return flashsale.NewPGReserver(newPool(t), perUserLimit)
+	case "redis":
+		return flashsale.NewRedisReserver(newRedis(t), perUserLimit, testKeyTTL)
+	case "stream":
+		return flashsale.NewStreamReserver(newRedis(t), newPool(t), perUserLimit, testKeyTTL)
+	default:
+		t.Fatalf("unknown backend %q", backend)
+		return nil
+	}
+}
+
+// newPool skips the test when Postgres is unreachable, so `go test ./...` still
+// works without docker compose up.
+func newPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout())
 	defer cancel()
 
-	switch backend {
-	case "postgres":
-		dsn := env("TEST_DATABASE_URL", env("DATABASE_URL",
-			"postgres://flashsale:flashsale@localhost:5432/flashsale?sslmode=disable"))
-		pool, err := pgxpool.New(context.Background(), dsn)
-		if err != nil {
-			t.Skipf("postgres unavailable (%v); run `make up` to enable this test", err)
-		}
-		if err := pool.Ping(ctx); err != nil {
-			pool.Close()
-			t.Skipf("postgres unavailable (%v); run `make up` to enable this test", err)
-		}
-		t.Cleanup(pool.Close)
-		if err := flashsale.Migrate(ctx, pool); err != nil {
-			t.Fatalf("migrate: %v", err)
-		}
-		return flashsale.NewPGReserver(pool, perUserLimit)
-
-	case "redis":
-		rdb := redis.NewClient(&redis.Options{Addr: env("REDIS_ADDR", "localhost:6379")})
-		if err := rdb.Ping(ctx).Err(); err != nil {
-			rdb.Close()
-			t.Skipf("redis unavailable (%v); run `make up` to enable this test", err)
-		}
-		t.Cleanup(func() { rdb.Close() })
-		// A TTL keeps test SKUs from piling up and exercises the expiry path in reserve.lua.
-		return flashsale.NewRedisReserver(rdb, perUserLimit, time.Hour)
-
-	default:
-		t.Fatalf("unknown backend %q", backend)
-		return nil
+	dsn := env("TEST_DATABASE_URL", env("DATABASE_URL",
+		"postgres://flashsale:flashsale@localhost:5432/flashsale?sslmode=disable"))
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Skipf("postgres unavailable (%v); run `make up` to enable this test", err)
 	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		t.Skipf("postgres unavailable (%v); run `make up` to enable this test", err)
+	}
+	t.Cleanup(pool.Close)
+	if err := flashsale.Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return pool
+}
+
+// newRedis skips the test when Redis is unreachable.
+func newRedis(t *testing.T) *redis.Client {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout())
+	defer cancel()
+
+	rdb := redis.NewClient(&redis.Options{Addr: env("REDIS_ADDR", "localhost:6379")})
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		rdb.Close()
+		t.Skipf("redis unavailable (%v); run `make up` to enable this test", err)
+	}
+	t.Cleanup(func() { rdb.Close() })
+	return rdb
 }
 
 func env(key, fallback string) string {

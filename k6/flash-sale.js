@@ -1,4 +1,4 @@
-// Throughput baseline for one reservation backend: point VERSION at v1 or v2 and
+// Throughput baseline for one reservation backend: point VERSION at v1, v2 or v3 and
 // everything else stays identical, so the two numbers are comparable.
 //
 // Stock is seeded far above what a run can consume on purpose, because a sold-out
