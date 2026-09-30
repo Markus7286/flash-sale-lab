@@ -1,0 +1,51 @@
+groups:
+  - name: flash-sale
+    rules:
+      # Reconcile counts a mismatch only after two consecutive disagreeing rounds,
+      # so a single increment already survived the in-flight-write false positive.
+      - alert: ReconcileMismatch
+        expr: increase(flash_sale_reconcile_mismatch_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Reconciliation found the books out of balance"
+          description: "remaining + sold != total, or sold != persisted + queued, on two consecutive rounds."
+
+      - alert: ReservationsCompensated
+        expr: increase(flash_sale_compensation_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Stock was handed back after a permanent write failure"
+          description: "{{ $value | printf \"%.0f\" }} reservation(s) hit STREAM_MAX_DELIVERIES and were rolled back into stock."
+
+      # Backlog spikes during a bench are expected; only a backlog that fails to
+      # drain means the worker is losing to the producer.
+      - alert: BacklogNotDraining
+        expr: sum(flash_sale_stream_pending) > 1000
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Reserved units are not reaching Postgres"
+          description: "{{ $value | printf \"%.0f\" }} units have been reserved but unpersisted for 2m."
+
+      - alert: ReservationErrors
+        expr: |
+          sum(rate(flash_sale_requests_total{result=~"error|unknown_backend"}[5m]))
+            / sum(rate(flash_sale_requests_total[5m])) > 0.01
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Over 1% of reservation requests are failing"
+
+      - alert: TargetDown
+        expr: up{job=~"api|worker"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} is not being scraped"
