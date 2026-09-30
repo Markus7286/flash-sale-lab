@@ -52,28 +52,52 @@ with a ramping profile to find the actual knee.
 An earlier v1 run at identical settings gave 806 req/s / p95 139 ms, so treat the
 v1 figure as ~780–810 req/s rather than a precise 774.
 
-## v3 — 2026-09-30
+## All three backends — 2026-09-30
 
-Same method, same machine, `make bench-v3`. v3 is v2 plus an `XADD` inside the
-same Lua script and a worker that persists each order to Postgres afterwards.
+The 2026-09-10 table above compares v1 and v2 but predates v3 and the
+observability stack. This section re-runs all three on one afternoon, back to
+back, alternating versions so machine load lands on every version equally.
+Three runs each; the spread is the full range observed.
 
 | | v1 `postgres-update` | v2 `redis-lua` | v3 `redis-stream` |
 |---|---|---|---|
-| Throughput | 774 req/s | 26,199 req/s | 18,669 req/s |
-| p50 | 53.6 ms | 1.60 ms | 2.32 ms |
-| p90 | 108.4 ms | 2.67 ms | 3.88 ms |
-| p95 | 127.8 ms | 3.07 ms | 4.40 ms |
-| p99 | 176.7 ms | 4.03 ms | 5.66 ms |
-| max | 373.9 ms | 611.2 ms | 389.9 ms |
-| Failed requests | 0 / 23,372 | 0 / 804,620 | 0 / 567,952 |
+| Throughput | 434–491 req/s | 15,122–15,554 req/s | 10,972–11,308 req/s |
+| p50 | 102.6 ms | 2.73 ms | 3.86 ms |
+| p90 | 181.3 ms | 5.03 ms | 6.59 ms |
+| p95 | 216.6 ms | 5.86 ms | 7.44 ms |
+| p99 | 272.8–302.9 ms | 7.61–7.64 ms | 9.24–9.60 ms |
+| max | 668.1 ms | 159.2 ms | 329.2 ms |
+| Failed requests | 0 | 0 | 0 |
 | Oversold | 0 | 0 | 0 |
 
-v3 gives up 29% of v2's throughput, and that is the honest price of
-durability: the same script now also appends to a stream, and the API still
-answers before the order reaches Postgres. Against v1 it is **24×** the
-throughput at **31× lower p99** — while writing the same rows to the same table.
+Quantiles are from the third run of each; throughput and p99 give the range
+across all three. Run-to-run spread is under 3% for v2 and v3.
 
-The books after the run, with the worker left to drain:
+**Every absolute number here is lower than 2026-09-10** — v1 fell from 774 to
+~445 req/s, v2 from 26,199 to ~15,300. Nothing regressed in the code. The
+machine now also runs Prometheus and Grafana, and Prometheus scrapes both
+binaries every 5 s, which is the price of Phase 4 being switched on. The
+v2-over-v1 ratio is **34.9×** today against 33.8× on 2026-09-10, which is the
+caveat at the top of this file being borne out: the ratio travels, the ceiling
+does not.
+
+### What v3 costs
+
+v3 does everything v2 does, plus an `XADD` in the same Lua script, plus a worker
+persisting each order to Postgres. It runs at **73% of v2's throughput** and
+about 1.2 ms behind it at p99. Against v1 it is still **26×** the throughput at
+**33× lower p99** — while writing the same rows to the same table v1 writes
+synchronously.
+
+An early isolated v3 run measured 18,669 req/s, which is higher than any v2 run
+here. That number is not in the table and should not be quoted: it was the first
+run after `make up`, against an empty Redis with no prior backlog draining, and
+nothing else had run on the box. Paired alternating runs are the only comparison
+this file trusts, and they put v3 consistently below v2.
+
+### The books
+
+From the 18,669 req/s run, after the worker was left to drain:
 
 ```
 total 2,000,000   remaining 1,432,050   sold 567,950
@@ -81,7 +105,7 @@ persisted 567,950   rows 567,950   request_ids 567,950   queued 0   dead 0
 ```
 
 `rows == request_ids == sold` is the claim that matters: every reservation became
-exactly one order row, none lost and none duplicated.
+exactly one order row, none lost and none duplicated. It held on every v3 run.
 
 ## Fault injection — 2026-09-30
 
@@ -99,9 +123,9 @@ exactly one order row, none lost and none duplicated.
 | Dead letters | 0 | 0 | 0 |
 | Compensations | 0 | 0 | 0 |
 
-Throughput drops run over run because the runs were back to back on a machine
-that was still draining the previous backlog, not because fault injection costs
-3,400 req/s. What the runs establish is the invariant, not the number.
+These runs are not comparable to the table above either — they were consecutive,
+each starting while the previous backlog was still draining. What they establish
+is the invariant, not the number.
 
 Zero compensations is the expected result rather than a lucky one: killing a
 worker and dropping connections are both *transient* failures, which the consumer
@@ -136,6 +160,7 @@ The v2 `max` of 611 ms is worse than v1's and is not noise worth hiding: it is
 the first request of the run paying for script loading plus connection pool
 warm-up, against a p99 of 4 ms.
 
-50 VUs is very likely not enough to saturate v2 or v3 — p99 stayed at 4 ms throughout,
-which is not the signature of a system under pressure. The 26k figure is a floor,
-not a ceiling.
+50 VUs is very likely not enough to saturate v2 or v3 — p99 stayed in the single
+digits of milliseconds throughout, which is not the signature of a system under
+pressure. Every Redis-path figure here is a floor, not a ceiling; Phase 5's
+ramping profile is what will find the knee.
