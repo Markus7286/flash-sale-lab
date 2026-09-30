@@ -46,8 +46,8 @@ ramp:
 spike:
 	$(K6) /scripts/spike.js -e VERSION=$(VERSION)
 
-# 30 minutes below the knee. Watch Grafana, not the summary: a soak fails on
-# drift, and an aggregate over 30 minutes is exactly what hides drift.
+# 10 minutes below the knee, DURATION=30m for longer. Watch Grafana, not the
+# summary: a soak fails on drift, and an aggregate is exactly what hides drift.
 soak:
 	$(K6) /scripts/soak.js -e VERSION=$(VERSION)
 

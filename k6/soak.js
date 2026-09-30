@@ -1,7 +1,10 @@
-// Thirty minutes at a rate the system handles comfortably. A soak is not looking
-// for a ceiling -- it is looking for the things a 30s run cannot show: a leaking
+// Ten minutes at a rate the system handles comfortably. A soak is not looking for
+// a ceiling -- it is looking for the things a 30s run cannot show: a leaking
 // connection pool, an unbounded stream, a consumer group whose pending list only
 // grows, latency that drifts upward as Redis fills.
+//
+// Ten rather than thirty because the default has to be short enough that it
+// actually gets run. Pass DURATION=30m for the long version.
 //
 // The k6 summary here is an aggregate over the whole run, which by construction
 // hides drift. The drift view is Grafana: flash_sale_stream_pending must come back
@@ -13,7 +16,7 @@ import { overall } from './lib/report.js';
 
 const STOCK = Number(__ENV.STOCK || 30000000);
 const RATE = Number(__ENV.RATE || 8000);
-const DURATION = __ENV.DURATION || '30m';
+const DURATION = __ENV.DURATION || '10m';
 const MAX_VUS = Number(__ENV.MAX_VUS || 1000);
 
 export const options = {

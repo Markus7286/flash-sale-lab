@@ -154,6 +154,36 @@ than VU count: a constant-VU test cannot overload a service, because slower
 responses just mean fewer requests. Every column below is that step's own
 sub-metric, not a whole-run aggregate.
 
+### v1 `postgres-update`
+
+Steps of 100/s rather than 2,000/s, `MAX_VUS=2000`.
+
+| arrival | achieved | p50 | p95 | p99 | max | fail |
+|---|---|---|---|---|---|---|
+| 100/s | 100/s | 1.71 ms | 3.55 ms | 4.44 ms | 7.86 ms | 0% |
+| 200/s | 200/s | 1.52 ms | 2.39 ms | 3.38 ms | 73.78 ms | 0% |
+| 300/s | 300/s | 1.48 ms | 2.06 ms | 3.03 ms | 75.59 ms | 0% |
+| 400/s | 400/s | 1.44 ms | 2.03 ms | 3.24 ms | 9.03 ms | 0% |
+| 500/s | 500/s | 1.43 ms | 1.88 ms | 2.80 ms | 73.15 ms | 0% |
+| 600/s | 600/s | 1.45 ms | 1.98 ms | 3.15 ms | 67.24 ms | 0% |
+| 700/s | 700/s | 1.39 ms | 2.01 ms | 4.26 ms | 30.35 ms | 0% |
+| 800/s | **769/s** | 358 ms | 863 ms | 944 ms | 1,273 ms | 0% |
+| 900/s | 749/s | 1,955 ms | 2,909 ms | 3,015 ms | 3,308 ms | 0% |
+| 1,000/s | 661/s | 2,782 ms | 3,251 ms | 3,344 ms | 3,737 ms | 0% |
+
+**This changes the story the 2026-09-10 table tells.** v1 serves 700 req/s at a
+p99 of 4.26 ms — it is not a slow implementation, it is a narrow one. Seven steps
+pass with latency flat or falling, then one step past the limit the median is
+358 ms and two steps past it two seconds. The row lock either absorbs the offered
+concurrency or it does not.
+
+The 50-VU baseline reports v1 at ~450 req/s and p99 290 ms because 50 concurrent
+buyers offer roughly 20× what the lock can absorb: that run measures v1 in
+collapse, not v1 working. Both readings are real; they answer different questions.
+
+`Insufficient VUs` appeared at steps 9 and 10, so those two arrival figures are
+nominal. Step 8 — the first failing step, and the one the knee rests on — is clean.
+
 ### v2 `redis-lua`
 
 | arrival | achieved | p50 | p95 | p99 | max | fail |
@@ -192,7 +222,14 @@ to 12,498/s when offered 20,000/s, with p99 nearly 4× worse. A fixed-VU benchma
 cannot show this, because it cannot offer more load than the service accepts.
 
 Sustainable rate — achieved still within 3% of arrival, p99 still double-digit —
-is about **12,000/s for v2 and 10,000/s for v3**.
+is about **700/s for v1, 12,000/s for v2 and 10,000/s for v3**. Compared that way
+v2 is **17× v1**, not the 34.9× the fixed-concurrency runs report; the larger
+figure credits v2 for v1 collapsing rather than for v2 scaling.
+
+Overload behaviour is the other half of the comparison, and it separates them
+further than throughput does. Pushed past its knee, v1's p99 reaches 3,344 ms —
+roughly 780× its healthy p99. v2 reaches 380 ms, about 12× its own. Both collapse;
+one collapses gently.
 
 The v3 collapse is sharper and earlier. Its extra work per request is an `XADD`
 in the same script, so Redis does strictly more per reservation on the one core
@@ -241,16 +278,71 @@ The 15,000/s target was chosen before the ramp existed and is above both
 versions' ceilings, which makes this an overload test as well as a spike test.
 That is the more useful question anyway: a sale opening does not ask permission.
 
+## Soak — 2026-09-30
+
+`make soak`, v3 at 8,000/s. 10 minutes; the first ~90 s is the executor ramping
+VUs, so the measurement window is the 9 minutes of flat 7,989 req/s from 15:52:00
+to 16:01:00 UTC, 4,308,338 requests. Values below are from Prometheus at 30 s
+resolution, comparing the mean of the first three samples against the last three.
+
+| | min | max | first 90 s | last 90 s | drift |
+|---|---|---|---|---|---|
+| p50 | 0.32 ms | 0.42 ms | 0.37 ms | 0.37 ms | −0.01 ms |
+| p95 | 0.97 ms | 2.96 ms | 1.70 ms | 1.50 ms | −0.20 ms |
+| p99 | 2.35 ms | 8.29 ms | 4.33 ms | 3.49 ms | −0.84 ms |
+| Throughput | 7,953/s | 7,998/s | 7,987/s | 7,993/s | +6/s |
+| Write backlog | 25 | 77 | 36 | 39 | +3 |
+| API RSS | 100.2 MiB | 109.6 MiB | 101.4 MiB | 104.8 MiB | +3.4 MiB |
+| Worker RSS | 22.5 MiB | 23.6 MiB | 22.9 MiB | 23.0 MiB | +0.1 MiB |
+| Failed requests | 0 | 0 | 0 | 0 | — |
+
+Nothing drifts. p99 *improves* slightly, which is a warm connection pool and a
+loaded script cache rather than a mystery. The backlog oscillates between 25 and
+77 orders across 4.3M insertions and never trends upward: the writer stays ahead
+of the producer for the whole run.
+
+Books at the end, after the last batch drained:
+
+```
+total 30,000,000   remaining 25,123,676   sold 4,876,324
+persisted 4,876,324   rows 4,876,324   duplicate request_ids 0
+queued 0   stream 0   dead 0   compensations 0   reconcile mismatches 0
+```
+
+### The one thing it surfaced
+
+API goroutines step from 171 to 491 about two minutes in and hold there for the
+rest of the run, which looks like a leak until you watch what happens at the end:
+they return to 10. The step is k6's arrival-rate executor allocating VUs to hold
+8,000/s, and `net/http` running a goroutine per connection. The spike test's peak
+of 6,781 goroutines collapsed to 10 the same way. Worth recording precisely
+because the shape is the same as a leak and only the recovery distinguishes them.
+
+### Caveat on the duration
+
+This is **10 minutes, not 30**. The profile default was cut to 10 so that the
+target actually gets run; `make soak DURATION=30m` still exists and no 30-minute
+run is recorded in this file. A 10-minute window at 8,000/s is 4.3M requests and
+is enough to rule out per-request leaks and backlog growth. It is not enough to
+rule out something with an hourly period.
+
 ## Reading the gap
 
 v1 is not a strawman — it is correct, and `CHECK (stock >= 0)` means the database
 itself would refuse to oversell even if the application logic were wrong. What it
 cannot escape is the shape of the problem: **every buyer of one SKU contends on
-one row.** `UPDATE products SET stock = stock - 1 WHERE sku = $1 AND stock >= 1`
+one row.** `UPDATE products SET stock = stock - $2 WHERE sku = $1 AND stock >= $2`
 takes a row lock that is held until the transaction commits, so the product row
 serialises the entire sale. Throughput becomes a function of transaction latency,
 and 50 concurrent buyers spend most of their time queued behind that lock — which
 is exactly what the 53 ms median says.
+
+The ramp added the part this section originally got wrong. Serialisation is not a
+tax paid on every request; it is a cliff. Up to 700 req/s the lock is free when a
+request arrives and v1 answers in 1.4 ms — better than v2 does at v2's own
+sustainable rate. The interesting quantity was never v1's latency, it was the
+arrival rate at which the lock stops keeping up, and past that point the queue
+does the rest.
 
 v1 is also deliberately written as the textbook application-side transaction,
 not the fastest Postgres can do: six round trips per reservation (BEGIN, replay
