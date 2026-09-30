@@ -42,7 +42,7 @@
             "uid": "flash-sale-prom"
           },
           "editorMode": "code",
-          "expr": "sum(rate(flash_sale_requests_total{result=\"reserved\"}[15s]))",
+          "expr": "sum(rate(flash_sale_requests_total{result=\"reserved\"}[15s])) or vector(0)",
           "legendFormat": "reserved/s",
           "range": true,
           "refId": "A"
@@ -182,7 +182,7 @@
             "uid": "flash-sale-prom"
           },
           "editorMode": "code",
-          "expr": "sum(rate(flash_sale_requests_total{result=~\"error|unknown_backend\"}[15s])) / clamp_min(sum(rate(flash_sale_requests_total[15s])), 0.001)",
+          "expr": "(sum(rate(flash_sale_requests_total{result=~\"error|unknown_backend\"}[15s])) or vector(0)) / clamp_min(sum(rate(flash_sale_requests_total[15s])) or vector(0.001), 0.001)",
           "legendFormat": "errors",
           "range": true,
           "refId": "A"
@@ -256,7 +256,7 @@
             "uid": "flash-sale-prom"
           },
           "editorMode": "code",
-          "expr": "sum(flash_sale_stream_pending)",
+          "expr": "sum(flash_sale_stream_pending) or vector(0)",
           "legendFormat": "queued",
           "range": true,
           "refId": "A"

@@ -32,6 +32,13 @@ func newStreamSale(t *testing.T, stock int64) streamSale {
 	if err := s.reserver.SeedStock(context.Background(), s.sku, stock); err != nil {
 		t.Fatalf("seed stock: %v", err)
 	}
+	// Deregister afterwards or the worker from `make up` keeps reconciling a SKU
+	// whose books this test tore down on purpose.
+	t.Cleanup(func() {
+		if err := s.reserver.DropSKU(context.Background(), s.sku); err != nil {
+			t.Errorf("drop sku: %v", err)
+		}
+	})
 	return s
 }
 

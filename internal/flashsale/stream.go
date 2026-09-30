@@ -98,3 +98,20 @@ func (s *StreamReserver) SeedStock(ctx context.Context, sku string, stock int64)
 	}
 	return nil
 }
+
+// DropSKU tears a sale down completely. Deregistering first is what makes it safe
+// to run while a worker is up: the reconciler must stop looking at the SKU before
+// the counters it balances disappear, or it reports books that no longer exist.
+func (s *StreamReserver) DropSKU(ctx context.Context, sku string) error {
+	if err := s.rdb.SRem(ctx, skusKey, sku).Err(); err != nil {
+		return fmt.Errorf("deregister %q: %w", sku, err)
+	}
+	if err := s.rdb.Del(ctx, stockKey(sku), totalKey(sku), usersKey(sku), reqsKey(sku),
+		soldKey(sku), queuedKey(sku), ordersKey(sku), deadKey(sku)).Err(); err != nil {
+		return fmt.Errorf("drop keys for %q: %w", sku, err)
+	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM sale_orders WHERE sku = $1`, sku); err != nil {
+		return fmt.Errorf("clear sale orders for %q: %w", sku, err)
+	}
+	return nil
+}

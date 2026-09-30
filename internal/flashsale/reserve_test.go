@@ -97,6 +97,26 @@ func skuFor(t *testing.T) string {
 	return fmt.Sprintf("sku-%s-%d", name, time.Now().UnixNano())
 }
 
+// seedSKU stocks a SKU for one test and tears it down afterwards. The teardown is
+// what keeps `go test` safe to run against a live `make up`: a v3 SKU left in the
+// registry stays under the running worker's reconciler until its keys expire, and
+// a test that unbalances the books on purpose gets reported every round.
+func seedSKU(t *testing.T, reserver flashsale.Reserver, stock int64) string {
+	t.Helper()
+	sku := skuFor(t)
+	if err := reserver.SeedStock(context.Background(), sku, stock); err != nil {
+		t.Fatalf("seed stock: %v", err)
+	}
+	if stream, ok := reserver.(*flashsale.StreamReserver); ok {
+		t.Cleanup(func() {
+			if err := stream.DropSKU(context.Background(), sku); err != nil {
+				t.Errorf("drop sku: %v", err)
+			}
+		})
+	}
+	return sku
+}
+
 // TestReserveConcurrent is the acceptance test: 1000 buyers race for 100 units
 // and exactly 100 must win, not roughly 100.
 func TestReserveConcurrent(t *testing.T) {
@@ -110,11 +130,7 @@ func TestReserveConcurrent(t *testing.T) {
 		t.Run(backend, func(t *testing.T) {
 			reserver := newReserver(t, backend, perUser)
 			ctx := context.Background()
-			sku := skuFor(t)
-
-			if err := reserver.SeedStock(ctx, sku, stock); err != nil {
-				t.Fatalf("seed stock: %v", err)
-			}
+			sku := seedSKU(t, reserver, stock)
 
 			var reserved, soldOut, other atomic.Int64
 
@@ -190,11 +206,7 @@ func TestReserveIdempotent(t *testing.T) {
 		t.Run(backend, func(t *testing.T) {
 			reserver := newReserver(t, backend, 1)
 			ctx := context.Background()
-			sku := skuFor(t)
-
-			if err := reserver.SeedStock(ctx, sku, 10); err != nil {
-				t.Fatalf("seed stock: %v", err)
-			}
+			sku := seedSKU(t, reserver, 10)
 
 			req := flashsale.Request{SKU: sku, UserID: "u1", RequestID: "same-request", Qty: 1}
 
@@ -240,11 +252,7 @@ func TestReserveConcurrentReplay(t *testing.T) {
 		t.Run(backend, func(t *testing.T) {
 			reserver := newReserver(t, backend, 1)
 			ctx := context.Background()
-			sku := skuFor(t)
-
-			if err := reserver.SeedStock(ctx, sku, 50); err != nil {
-				t.Fatalf("seed stock: %v", err)
-			}
+			sku := seedSKU(t, reserver, 50)
 
 			req := flashsale.Request{SKU: sku, UserID: "u1", RequestID: "one-and-only", Qty: 1}
 
@@ -295,11 +303,7 @@ func TestReservePerUserLimit(t *testing.T) {
 		t.Run(backend, func(t *testing.T) {
 			reserver := newReserver(t, backend, perUser)
 			ctx := context.Background()
-			sku := skuFor(t)
-
-			if err := reserver.SeedStock(ctx, sku, 10); err != nil {
-				t.Fatalf("seed stock: %v", err)
-			}
+			sku := seedSKU(t, reserver, 10)
 
 			for attempt := range perUser {
 				res, err := reserver.Reserve(ctx, flashsale.Request{
