@@ -66,6 +66,25 @@ services:
       redis:
         condition: service_healthy
 
+  # v0 / v0b: the v1 contract in Laravel against the same database, so the only
+  # difference from v1 is the language and the framework. See php/README.md.
+  api-php:
+    build: ./php
+    ports:
+      - "${API_PHP_PORT:-8090}:8090"
+    environment:
+      <<: *app-env
+      # One FPM worker per pool connection the Go api is allowed.
+      FPM_WORKERS: ${FPM_WORKERS:-${DB_MAX_CONNS:-25}}
+    volumes:
+      # Mounted rather than copied, so there is exactly one schema.
+      - ./internal/flashsale/schema.sql:/srv/schema.sql:ro
+    sysctls:
+      net.core.somaxconn: 4096
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   prometheus:
     image: prom/prometheus:${PROMETHEUS_VERSION:-v3.14.0}
     volumes:

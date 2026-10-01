@@ -1,0 +1,6 @@
+vendor
+storage/logs/*
+storage/framework/cache/data/*
+storage/framework/views/*
+bootstrap/cache/*.php
+.phpunit.cache
