@@ -365,3 +365,136 @@ warm-up, against a p99 of 4 ms.
 digits of milliseconds throughout, which is not the signature of a system under
 pressure. Every Redis-path figure here is a floor, not a ceiling; Phase 5's
 ramping profile is what will find the knee.
+
+## Laravel v0 — 2026-10-01
+
+v0 is v1's transaction rewritten in Laravel 13 on PHP 8.4 (`php/`); v0b is the same
+transaction through Eloquent models. Same Postgres container, same schema file, same
+six round trips per reservation (verified in the statement log), same HTTP contract
+(25 requests diffed byte for byte), same k6 scripts with only `BASE_URL` changed.
+What differs is the language, the framework, and — for v0b — the ORM. The full list
+of what was held equal, and every PHP-FPM, OPcache and JIT setting, is in
+[`php/README.md`](../php/README.md).
+
+All runs on this page were made in one session, alternating versions, with the
+whole stack up as on 2026-09-30. v1 was re-measured alongside rather than quoted
+from above, because the same v1 binary on the same host moved by ~15% between days.
+
+### Baseline — 50 VUs, 30 s, three alternating runs
+
+| | v1 Go | v0 Laravel | v0b Eloquent |
+|---|---|---|---|
+| Throughput | 661–703 req/s | 526–540 req/s | 409–414 req/s |
+| vs v1 | — | **78%** | **60%** |
+| p50 | 45.6–48.8 ms | 49.7–51.0 ms | 68.4–70.9 ms |
+| p95 | 167.9–168.7 ms | 248.1–256.2 ms | 283.4–295.1 ms |
+| p99 | 270.0–277.1 ms | 432.7–465.1 ms | 505.2–524.7 ms |
+| Server CPU | 0.54 cores | 1.62 cores | 1.76 cores |
+| Postgres CPU | 1.40–1.54 cores | 1.41–1.45 cores | 1.11–1.28 cores |
+| Failed requests | 0 | 0 | 0 |
+| Books balance | yes | yes | yes |
+
+CPU is one `docker stats` sample 15 s into each run, out of 20 cores. **Nobody is
+CPU-bound.** Per request Laravel burns about 3.0 ms of CPU to Go's 0.8 ms — roughly
+4× — and still leaves 18 cores idle; the limit is the same one v1 hits.
+
+### Ramp — 100/s steps, 20 s each, `MAX_VUS=2000`
+
+| arrival | v1 achieved | v1 p99 | v0 achieved | v0 p99 | v0b achieved | v0b p99 |
+|---|---|---|---|---|---|---|
+| 100/s | 100/s | 4.45 ms | 100/s | 6.73 ms | 100/s | 7.85 ms |
+| 200/s | 200/s | 2.86 ms | 200/s | 5.60 ms | 200/s | 6.70 ms |
+| 300/s | 300/s | 2.37 ms | 300/s | 5.26 ms | 300/s | 7.65 ms |
+| 400/s | 400/s | 2.35 ms | 400/s | 5.48 ms | 400/s | **8.04 ms** |
+| 500/s | 500/s | 2.39 ms | 500/s | 6.77 ms | **466/s** | 1,769 ms |
+| 600/s | 600/s | 2.99 ms | 600/s | **16.12 ms** | 480/s | 4,948 ms |
+| 700/s | 700/s | 4.25 ms | **626/s** | 4,541 ms | 423/s | 6,653 ms |
+| 800/s | 800/s | **5.17 ms** | 568/s | 4,534 ms | 425/s | 4,961 ms |
+| 900/s | **835/s** | 2,903 ms | 547/s | 5,566 ms | 426/s | 6,809 ms |
+| 1,000/s | 749/s | 2,952 ms | 547/s | 5,518 ms | 428/s | 6,762 ms |
+
+Medians at 400/s, where nothing is queueing: **1.43 ms** for v1, **3.69 ms** for v0,
+**4.98 ms** for v0b.
+
+| | v1 Go | v0 Laravel | v0b Eloquent |
+|---|---|---|---|
+| Sustainable rate | **800/s** | **600/s** | **400/s** |
+| Peak achieved | 835/s | 626/s | 480/s |
+| Unloaded p50 | 1.43 ms | 3.69 ms | 4.98 ms |
+| Serialised time per reservation (1 ÷ peak) | 1.20 ms | 1.60 ms | 2.08 ms |
+
+`Insufficient VUs` appeared at step 10 for v1, steps 8–10 for v0 and steps 6–10
+for v0b — all past each version's knee, so every step the knee rests on is clean.
+
+### What the gap is made of
+
+The knee is a lock, not a language. Every reservation holds the product row from
+its `UPDATE` until `COMMIT`, so the peak rate is the inverse of how long that
+stretch takes, and the last row of the table above reads it off directly. Go holds
+the lock for about 1.2 ms; Laravel holds it for 1.6 ms. **The 0.4 ms difference is
+PHP running between statements while the row is locked** — Laravel's query path,
+its event dispatch, PDO's binding and result handling — and because the lock
+serialises every buyer, that 0.4 ms is paid once per sale rather than once per
+core. That is why v0 loses 25% of v1's throughput while sitting on 18 idle cores.
+
+The rest of Laravel's cost — bootstrapping the framework per request, routing,
+middleware, the container — happens *outside* the transaction. It shows up in
+latency (3.69 ms against 1.43 ms unloaded, about 2.3 ms per request) but not in the
+knee, because it runs in parallel across workers.
+
+### What Eloquent costs
+
+v0b differs from v0 only in going through `Product` and `Order` models: the same
+six round trips, the same `UPDATE … RETURNING`, the same lock. Against v0 it loses
+**23% of throughput at 50 VUs and 33% of sustainable rate** (400/s against 600/s),
+and adds about 1.3 ms of unloaded latency.
+
+The mechanism is the same as above, one level down. Query building, hydrating
+models and firing model events add roughly 0.5 ms *inside the transaction*, and
+inside the transaction is the only place time is expensive. An ORM costs whatever
+it costs per query; under a hot row lock, that cost is multiplied by the
+serialisation.
+
+### Two checks that the configuration is not rigging it
+
+**Twice the workers is worse, not better.** With `FPM_WORKERS=50` (and so 50
+connections) v0 sustains 500/s and peaks at 537/s, against 600/s and 626/s with
+25. More concurrent transactions do not shorten the lock hold; they only add
+waiters and contention. 25 is not starving Laravel.
+
+The first attempt at this run failed 2% of requests from the first step: the
+extra container's 50 persistent connections, on top of the 25 the main PHP service
+held and the Go api's pool, exceeded Postgres's `max_connections = 100`. It was
+re-run with the main PHP service stopped and the Go pool restarted; the numbers
+above are from the clean run.
+
+**Laravel's connection defaults cost 3×.** With persistent connections off and
+native prepares on — what a fresh Laravel install does — v0 sustains **200/s**
+(p50 13–14 ms unloaded) and peaks at 304/s. Every request then opens a Postgres
+connection, authenticates with SCRAM, and has a backend forked for it, and every
+statement is a separate Parse round trip before its Execute. Those two settings are
+the only places v0 departs from Laravel's defaults, and both exist to keep the
+round-trip count equal to v1's.
+
+### Memory
+
+Each FPM worker is 31–38 MiB RSS under load, shared pages included; the whole
+container sits at 160 MiB by cgroup accounting. 25 workers is not a memory
+decision — by the usual rule of thumb a 2 GiB container would take 50, and 50 is
+measurably worse here.
+
+### One artifact on every version
+
+Low-load steps occasionally show a max of ~1,000 ms — 980 ms on v1, 990 ms on v0,
+1,020 ms with the defaults — while p99 at those steps stays in single-digit
+milliseconds. It appears on Go and PHP alike, so it is not the code under test;
+the near-constant one second matches a TCP SYN retransmit as k6 opens new
+connections, but that is a guess and was not investigated. It did not appear in
+the 2026-09-30 v1 ramp.
+
+### Not measured
+
+The v0.5 variant — Laravel under Octane, calling the same `reserve.lua` as v2 —
+is not built. It would answer whether the language still matters once the
+architecture is fixed; this page only shows that, with the architecture fixed at
+v1's, the framework costs 25% and the ORM another third of what is left.

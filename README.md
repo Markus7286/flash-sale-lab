@@ -1,5 +1,8 @@
 # flash-sale
 
+[![CI](https://github.com/Markus7286/flash-sale-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/Markus7286/flash-sale-lab/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A limited-stock flash sale service in Go that will not oversell, built three times
 over so the cost of each design is measurable rather than asserted.
 
@@ -29,6 +32,30 @@ which each design stops working.
 Measured on one machine with the load generator sharing it, so the ratios are
 worth more than the absolute numbers. Method and full results: §6 and
 [`docs/benchmarks.md`](docs/benchmarks.md).
+
+**The same v1 design was then rebuilt in Laravel** — same database, same schema
+file, same six round trips, same HTTP contract byte for byte, same k6 scripts —
+so that language and framework are the only variables:
+
+| | `v1` Go | `v0` Laravel | `v0b` Laravel + Eloquent | `v2` Go + Redis Lua |
+|---|---|---|---|---|
+| Design | row lock | the same row lock | the same row lock | no lock |
+| **Sustainable throughput** | **800 req/s** | **600 req/s** | **400 req/s** | **12,000 req/s** |
+| Relative to v1 | 1× | 0.75× | 0.5× | 15× |
+| Unloaded p50 | 1.43 ms | 3.69 ms | 4.98 ms | 0.63 ms |
+| Oversold units | 0 | 0 | 0 | 0 |
+
+v0, v0b and v1 were measured in one session, alternating; v2 is from §6, where v1
+measured 700 rather than 800 — the host moves ~15% between days, so the ratio
+is approximate.
+
+**Rewriting the row-lock design in a slower stack costs 25%. Changing the design
+gains 15×.** The bottleneck is the architecture, not the language: neither server
+is CPU-bound at its knee, and Laravel's 4× CPU per request reaches throughput only
+through the ~0.4 ms it spends between statements while the row is locked. The ORM
+is the same story one level down — Eloquent adds ~0.5 ms inside that window and
+costs a third of v0's rate. Every PHP-FPM, OPcache and JIT setting a production
+deployment would use is on; [`php/README.md`](php/README.md) lists them.
 
 ---
 
@@ -109,7 +136,7 @@ entirely. v3 is the one you would ship.
 Needs Docker and `make`. Nothing else.
 
 ```bash
-make up          # api, worker, postgres, redis, prometheus, grafana
+make up          # api, api-php, worker, postgres, redis, prometheus, grafana
 curl localhost:8080/healthz
 curl localhost:8080/backends
 ```
@@ -117,11 +144,13 @@ curl localhost:8080/backends
 | | |
 |---|---|
 | API | http://localhost:8080 |
+| Laravel API (v0, v0b) | http://localhost:8090 |
 | Grafana | http://localhost:3000 — opens on the dashboard, no login |
 | Prometheus | http://localhost:9090 |
 
 ```bash
 make test        # correctness suite, all three backends
+make correctness # the same exact-count assertions over HTTP, all five versions
 make bench-v2    # 50 VUs for 30s
 make ramp        # steps the arrival rate up to find the knee
 make spike       # 500/s, then 15,000/s instantly, then 500/s
@@ -266,11 +295,24 @@ than a lucky one: both injected failures are transient, and the consumer retries
 those forever. The compensation path is proven by the unit test that forces a
 permanent error.
 
-**Not covered:** `go test -race` does not build on the development machine (no
-gcc). The concurrency assertions are on final counts rather than on the race
-detector, so they hold regardless, but CI should run `-race`.
+**Race detector.** CI runs the whole suite with `-race` against real Postgres and
+Redis service containers, and fails if any test skipped — the suite skips rather
+than fails without its datastores, which would otherwise pass vacuously. The
+development machine has no gcc, so `-race` runs there in a `golang` container.
+
+**Over HTTP.** `k6/correctness.js` repeats the exact-count assertions — 1,000
+buyers for 100 units, 200 concurrent replays, one user's 20 attempts — against a
+running server, which is what lets the Laravel implementation be held to the same
+standard as the Go ones. `make correctness` runs it against all five versions.
 
 ## 6. Load testing
+
+**Benchmarks are run on a pinned host, never in CI, because runner CPU allocation
+is not stable** — the same commit on a hosted runner can differ by 30% between
+runs. CI runs the correctness suite, the fault test and a 30-second smoke run per
+version that asserts nothing failed and nothing oversold; the throughput k6 prints
+there is ignored. Every number below comes from the machine in
+[`docs/benchmarks.md`](docs/benchmarks.md#environment).
 
 Four profiles, all driving the identical request from `k6/lib/sale.js`:
 
@@ -396,6 +438,25 @@ This run is **10 minutes, not 30**. The profile's default was shortened to 10
 because a default nobody runs is worth nothing; `make soak DURATION=30m` is
 still there and the longer run has not been recorded here.
 
+### Laravel
+
+`make ramp VERSION=v0 STEP=100 MAX_VUS=2000`, same session as a fresh v1 ramp:
+
+| arrival | v1 achieved | v1 p99 | v0 achieved | v0 p99 | v0b achieved | v0b p99 |
+|---|---|---|---|---|---|---|
+| 400/s | 400/s | 2.35 ms | 400/s | 5.48 ms | 400/s | 8.04 ms |
+| 500/s | 500/s | 2.39 ms | 500/s | 6.77 ms | **466/s** | 1,769 ms |
+| 600/s | 600/s | 2.99 ms | 600/s | 16.12 ms | 480/s | 4,948 ms |
+| 700/s | 700/s | 4.25 ms | **626/s** | 4,541 ms | 423/s | 6,653 ms |
+| 800/s | 800/s | 5.17 ms | 568/s | 4,534 ms | 425/s | 4,961 ms |
+| 900/s | **835/s** | 2,903 ms | 547/s | 5,566 ms | 426/s | 6,809 ms |
+
+The same cliff, earlier. Peak throughput under a row lock is the inverse of how
+long each transaction holds the lock: 1.20 ms for Go, 1.60 ms for Laravel, 2.08 ms
+with Eloquent. Doubling PHP-FPM to 50 workers makes it worse (500/s), and Laravel's
+out-of-the-box connection settings make it 3× worse (200/s) — both in
+[`docs/benchmarks.md`](docs/benchmarks.md#laravel-v0--2026-10-01).
+
 ### Baselines
 
 Fixed concurrency, 50 VUs, 30 s, three alternating runs per version:
@@ -483,6 +544,9 @@ internal/httpapi instrument wrapper times every reservation
 internal/metrics the only package that imports Prometheus
 k6/lib/sale.js   the workload every profile shares
 k6/{ramp,spike,soak}.js
+k6/correctness.js exact-count assertions over HTTP, any version
+php/             v0 / v0b: the v1 transaction in Laravel, nginx + PHP-FPM
+.github/         CI: lint, test -race, fault-test, PHP lint, smoke
 prometheus/      scrape config + five alert rules
 grafana/         provisioned datasource and dashboard
 docs/            benchmarks and a line-by-line walkthrough
