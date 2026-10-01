@@ -4,7 +4,9 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A limited-stock flash sale service in Go that will not oversell, built three times
-over so the cost of each design is measurable rather than asserted.
+over so the cost of each design is measurable rather than asserted — and the
+slowest design built once more in Laravel, so the cost of the design can be told
+apart from the cost of the stack.
 
 The same correctness suite runs against all three implementations. They differ
 only in where atomicity comes from:
@@ -549,7 +551,7 @@ php/             v0 / v0b: the v1 transaction in Laravel, nginx + PHP-FPM
 .github/         CI: lint, test -race, fault-test, PHP lint, smoke
 prometheus/      scrape config + five alert rules
 grafana/         provisioned datasource and dashboard
-docs/            benchmarks and a line-by-line walkthrough
+docs/            benchmarks: environment, method, every run
 ```
 
 Three backends, one `Reserver` interface, so the tests and handlers are written
