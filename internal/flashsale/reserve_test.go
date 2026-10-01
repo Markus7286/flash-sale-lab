@@ -76,10 +76,10 @@ func newRedis(t *testing.T) *redis.Client {
 
 	rdb := redis.NewClient(&redis.Options{Addr: env("REDIS_ADDR", "localhost:6379")})
 	if err := rdb.Ping(ctx).Err(); err != nil {
-		rdb.Close()
+		_ = rdb.Close()
 		t.Skipf("redis unavailable (%v); run `make up` to enable this test", err)
 	}
-	t.Cleanup(func() { rdb.Close() })
+	t.Cleanup(func() { _ = rdb.Close() })
 	return rdb
 }
 

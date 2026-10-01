@@ -57,7 +57,7 @@ func run(logger *slog.Logger, cfg config.Config) error {
 	logger.Info("connected to postgres", "max_conns", pool.Config().MaxConns)
 
 	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
-	defer rdb.Close()
+	defer func() { _ = rdb.Close() }()
 	if err := rdb.Ping(dialCtx).Err(); err != nil {
 		return err
 	}
