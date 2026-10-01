@@ -1,0 +1,124 @@
+name: CI
+
+# Correctness only. Throughput is never measured here: a hosted runner's CPU
+# allocation varies enough between runs that the same commit can differ by 30%,
+# so every number in docs/benchmarks.md comes from a pinned host instead.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.14.0
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: flashsale
+          POSTGRES_PASSWORD: flashsale
+          POSTGRES_DB: flashsale
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U flashsale"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: go test -race
+        run: |
+          set -o pipefail
+          go test -race -count=1 -v ./... | tee test.log
+      # The suite skips rather than fails when it cannot reach its datastores, and
+      # a run where every test skipped would otherwise report green.
+      - name: no test was skipped
+        run: |
+          if grep -- '--- SKIP' test.log; then
+            echo "::error::tests were skipped; the datastores were not reachable"
+            exit 1
+          fi
+
+  fault-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: start the stack
+        run: |
+          docker compose up -d --build --wait postgres redis
+          docker compose up -d --build api worker
+          timeout 120 sh -c 'until curl -fsS localhost:8080/healthz; do sleep 1; done'
+      - name: kill the worker and every database connection mid-load
+        run: ./scripts/fault-test.sh
+      - name: logs
+        if: failure()
+        run: docker compose logs --tail 200 api worker
+
+  php:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: php
+    steps:
+      - uses: actions/checkout@v5
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          # Larastan boots the app, and config/database.php names Pdo\Pgsql constants.
+          extensions: pdo_pgsql
+          tools: composer:v2
+          coverage: none
+      - run: composer install --no-interaction --no-progress --prefer-dist
+      - run: vendor/bin/pint --test
+      - run: vendor/bin/phpstan analyse --no-progress --memory-limit=1G
+
+  # Exact-count correctness for every version over HTTP, then a short run under
+  # load that only asserts nothing failed and nothing oversold. A smoke test, not
+  # a benchmark: its throughput is printed by k6 and deliberately ignored.
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: start the stack
+        run: |
+          docker compose up -d --build --wait postgres redis
+          docker compose up -d --build api worker api-php
+          timeout 120 sh -c 'until curl -fsS localhost:8080/healthz; do sleep 1; done'
+          timeout 120 sh -c 'until curl -fsS localhost:8090/healthz; do sleep 1; done'
+      - name: 1,000 buyers for 100 units, replays, per-user limit
+        run: make correctness
+      - name: 30 s under load per version (smoke, not a benchmark)
+        run: |
+          for v in v1 v2 v3 v0 v0b; do
+            make bench-$v DURATION=30s VUS=10
+          done
+      - name: logs
+        if: failure()
+        run: docker compose logs --tail 200 api worker api-php
