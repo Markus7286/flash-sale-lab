@@ -436,9 +436,8 @@ arrival-rate executor allocating VUs to hold the rate, one server goroutine per
 connection — it returns to 10 the moment load stops, and the spike test's peak of
 6,781 goroutines also collapsed to 10. A real leak does not come back down.
 
-This run is **10 minutes, not 30**. The profile's default was shortened to 10
-because a default nobody runs is worth nothing; `make soak DURATION=30m` is
-still there and the longer run has not been recorded here.
+Ten minutes rules out per-request leaks and backlog growth, not anything with
+an hourly period.
 
 ### Laravel
 

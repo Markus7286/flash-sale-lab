@@ -320,11 +320,9 @@ because the shape is the same as a leak and only the recovery distinguishes them
 
 ### Caveat on the duration
 
-This is **10 minutes, not 30**. The profile default was cut to 10 so that the
-target actually gets run; `make soak DURATION=30m` still exists and no 30-minute
-run is recorded in this file. A 10-minute window at 8,000/s is 4.3M requests and
-is enough to rule out per-request leaks and backlog growth. It is not enough to
-rule out something with an hourly period.
+A 10-minute window at 8,000/s is 4.3M requests and is enough to rule out
+per-request leaks and backlog growth. It is not enough to rule out something with
+an hourly period.
 
 ## Reading the gap
 
