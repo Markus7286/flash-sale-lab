@@ -9,7 +9,7 @@ which `Reserver` the request lands on.
 | `make bench-v1/v2/v3` | 50 VUs, 30 s | throughput at fixed concurrency |
 | `make ramp` | 10 steps of 2,000/s | where is the knee? |
 | `make spike` | 500/s → 15,000/s → 500/s | cost of a surge, and recovery |
-| `make soak` | 8,000/s for 30 min | does anything drift? |
+| `make soak` | 8,000/s for 10 min | does anything drift? |
 | `make fault-test` | bench-v3 + injected failures | are the books still right? |
 
 All four load profiles share one request definition (`k6/lib/sale.js`), so a ramp

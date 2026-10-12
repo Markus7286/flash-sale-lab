@@ -156,7 +156,7 @@ make correctness # the same exact-count assertions over HTTP, all five versions
 make bench-v2    # 50 VUs for 30s
 make ramp        # steps the arrival rate up to find the knee
 make spike       # 500/s, then 15,000/s instantly, then 500/s
-make soak        # 30 minutes below the knee
+make soak        # 10 minutes below the knee (DURATION=30m for longer)
 make fault-test  # kills the worker and every DB connection mid-load
 ```
 
@@ -323,7 +323,7 @@ Four profiles, all driving the identical request from `k6/lib/sale.js`:
 | `flash-sale.js` | throughput at fixed concurrency — the baseline table |
 | `ramp.js` | where is the knee? |
 | `spike.js` | what does an instant surge cost, and does it recover? |
-| `soak.js` | does anything drift over 30 minutes? |
+| `soak.js` | does anything drift over 10 minutes? |
 
 Method: stock is seeded to millions so the SKU never runs dry, because a sold-out
 request takes a shorter code path and would flatter whichever backend rejects
